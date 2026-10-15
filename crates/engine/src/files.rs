@@ -405,7 +405,15 @@ fn load_bytes_now(
         // the camera's measured matrices (`Photo::relative_wb` decides the same from the catalog's camera)
         let scale = WbScaleOf::new(raw.format, &raw.color, raw.wb_multipliers, &raw.metadata);
         // the source's segmentation mattes (DNG semantic masks), read while the starting colour is fitted
-        let ((xy, t, camera_look), mattes) = rayon::join(|| crate::camera_preview::starting_colour(&mut raw, &bytes), || dng_mattes(&bytes, &info));
+        // (and a DNG without a tone curve of its own gets one fitted to its preview)
+        let ((xy, t, camera_look, preview_tone), mattes) = rayon::join(
+            || {
+                let (xy, t, look) = crate::camera_preview::starting_colour(&mut raw, &bytes);
+                let tone = look.is_none().then(|| crate::camera_preview::dng_preview_tone(&raw, &bytes, &t)).flatten();
+                (xy, t, look, tone)
+            },
+            || dng_mattes(&bytes, &info),
+        );
         drop(bytes);
         // Previews and thumbnails bin the mosaic straight to (about) the size they need; only
         // larger levels (exports, 1:1) demosaic the whole sensor.
@@ -479,7 +487,8 @@ fn load_bytes_now(
             let tags = lightcraft_raw::ColorData { profile: Default::default(), ..raw.color.clone() };
             Arc::new(lightcraft_pipeline::CameraColor { tags, developed_for: xy })
         });
-        let camera_tone = camera_look.as_ref().map(|p| p.tone).or_else(|| raw.color.profile.tone_curve.as_ref().and_then(dng_tone_curve));
+        let camera_tone =
+            camera_look.as_ref().map(|p| p.tone).or_else(|| raw.color.profile.tone_curve.as_ref().and_then(dng_tone_curve)).or(preview_tone);
         let local_tone = local_tone(&raw);
         let (temp, tint) = scale.as_shot(xy);
         return Ok((

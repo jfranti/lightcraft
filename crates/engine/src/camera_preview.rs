@@ -30,7 +30,8 @@ use lightcraft_raw::{
 /// states, for every make (#778).
 /// 4: a tone curve from black-and-white camera JPEGs (#577).
 /// 5: dark JPEG luminance pairs for the camera toe (#1307).
-pub const LOOK_VERSION: u32 = 5;
+/// 6: a DNG without a `ProfileToneCurve` gets its tone curve fitted to its embedded preview (`dng_preview_tone`).
+pub const LOOK_VERSION: u32 = 6;
 
 #[derive(Clone, Debug)]
 pub(crate) struct CameraLook {
@@ -1074,6 +1075,27 @@ fn monochrome_look(raw: &RawImage, bytes: &[u8], transform: &CameraTransform) ->
         );
     }
     Some(look)
+}
+
+/// The tone curve of a DNG that carries none (`ProfileToneCurve`): fitted to its embedded preview, as for a raw with
+/// a file-local look, but tone only — the DNG's own colour matrices and profile stay in charge of colour. DNGs from
+/// Adobe's converter (and Lightroom's "Convert to DNG") carry a profile without a tone curve and expect the reader to
+/// apply Adobe's default curve; rendered with no camera curve at all they came out dark and hazy next to their own
+/// preview. `None` when the DNG has a curve, no usable preview, or the fit isn't clearly better than the default.
+pub(crate) fn dng_preview_tone(raw: &RawImage, bytes: &[u8], transform: &CameraTransform) -> Option<CameraTone> {
+    if raw.format != RawFormat::Dng || raw.color.profile.tone_curve.is_some() {
+        return None;
+    }
+    let (sensor, reference, clipped) = proxies(raw, bytes, transform, PROXY)?;
+    if monochrome(&reference) {
+        return None;
+    }
+    let unclipped = without_clipped(&sensor, &clipped);
+    let look = fit_tone_only(unclipped.as_ref().unwrap_or(&sensor), &reference, None)?;
+    if lightcraft_pipeline::profiling() {
+        eprintln!("[profile] DNG tone curve fitted to its preview: {:?}", look.tone);
+    }
+    Some(look.tone)
 }
 
 /// The tone curve of a black-and-white camera JPEG, on top of `colour` (a camera profile's, in the sensor proxy's
