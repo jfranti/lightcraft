@@ -138,8 +138,47 @@ fn import(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(json!({"imported": imported, "failed": failed}))
 }
 
+/// `profile.generate`: a seeded film look (`lightcraft_pipeline::film_seed`) added as a profile in the
+/// "Seeded Film" group, the same way an imported `.cube` is; `path` also saves the `.cube` there.
+fn generate(s: &mut Session, p: &Value) -> Result<Value> {
+    const C: &str = "profile.generate";
+    use lightcraft_pipeline::film_seed::FilmParams;
+    let seed = match p.get("seed") {
+        Some(v) => v.as_u64().or_else(|| v.as_str().and_then(|t| t.trim().parse().ok())).ok_or_else(|| bad(C, "seed must be a whole number"))?,
+        // no seed: a fresh one from the clock, kept short enough to read out and share
+        None => std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(1, |d| d.as_nanos() as u64 % 1_000_000),
+    };
+    let size = p.get("size").and_then(Value::as_u64).unwrap_or(33).clamp(9, 65) as usize;
+    let look = FilmParams::from_seed(seed);
+    let cube = look.lut(size).to_cube();
+    if let Some(path) = str_param(p, "path") {
+        std::fs::write(path, &cube).map_err(|e| bad(C, format!("{path}: {e}")))?;
+    }
+    // through the import path (the library keeps its own copy), from a folder named for the group
+    let root = std::env::temp_dir().join(format!("lightcraft-seeded-{}-{seed}", std::process::id()));
+    let dir = root.join("Seeded Film");
+    std::fs::create_dir_all(&dir).map_err(|e| bad(C, e.to_string()))?;
+    std::fs::write(dir.join(format!("film-{seed}.cube")), &cube).map_err(|e| bad(C, e.to_string()))?;
+    let r = import(s, &json!({"paths": [dir.to_string_lossy()]}));
+    let _ = std::fs::remove_dir_all(&root);
+    let mut r = r?;
+    r["seed"] = json!(seed);
+    r["archetype"] = json!(look.archetype.name());
+    r["look"] = serde_json::to_value(&look).unwrap_or_default();
+    Ok(r)
+}
+
 pub fn specs() -> Vec<CommandSpec> {
     vec![
+        cmd!(
+            "profile.generate",
+            "Generate Film Look",
+            [],
+            None,
+            "{seed?: number (a fresh one when omitted), size?: 9..65 (33), path?: also save the .cube there} — a seeded film look (print, slide, negative, faded, cross-process or bleach bypass) as a creative profile in the Seeded Film group; the same seed always gives the same look → {imported: [{id, name, group}], seed, archetype, look}",
+            always,
+            generate
+        ),
         cmd!(
             "profile.import",
             "Import Profiles",

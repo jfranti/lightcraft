@@ -28,6 +28,7 @@ pub mod blemish;
 pub mod colorops;
 pub mod cull;
 pub mod dust;
+pub mod film_seed;
 pub mod finish;
 pub mod geometry;
 pub mod local;

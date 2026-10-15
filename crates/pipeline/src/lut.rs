@@ -59,6 +59,24 @@ impl Lut3d {
         Ok(Lut3d { size, data, domain_min: min, domain_max: max, title })
     }
 
+    /// The LUT as a `.cube` file (readable by [`Lut3d::parse_cube`] and other applications).
+    pub fn to_cube(&self) -> String {
+        let mut out = String::with_capacity(self.data.len() * 28 + 128);
+        if let Some(t) = &self.title {
+            out += &format!("TITLE \"{}\"\n", t.replace('"', "'"));
+        }
+        out += &format!("LUT_3D_SIZE {}\n", self.size);
+        if self.domain_min != [0.0; 3] || self.domain_max != [1.0; 3] {
+            let [a, b, c] = self.domain_min;
+            let [d, e, f] = self.domain_max;
+            out += &format!("DOMAIN_MIN {a} {b} {c}\nDOMAIN_MAX {d} {e} {f}\n");
+        }
+        for [r, g, b] in &self.data {
+            out += &format!("{r:.6} {g:.6} {b:.6}\n");
+        }
+        out
+    }
+
     /// Look up `c` (trilinear).
     pub fn apply(&self, c: [f32; 3]) -> [f32; 3] {
         let n = self.size;
