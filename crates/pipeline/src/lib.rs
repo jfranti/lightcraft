@@ -40,6 +40,7 @@ pub mod profiles;
 pub mod redeye;
 pub mod spots;
 pub mod tone;
+pub mod tone_auto;
 pub mod transform;
 pub mod upright;
 pub mod visualize;

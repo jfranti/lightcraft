@@ -109,10 +109,26 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
     egui::Frame::NONE.inner_margin(egui::Margin { left: 24, right: 22, top: 8, bottom: 14 }).show(ui, |ui| {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
-            if text_button(ui, "auto", crate::i18n::tr("Auto"), false).clicked() {
+            let auto = text_button(ui, "auto", crate::i18n::tr("Auto"), false).on_hover_text(crate::i18n::tr("Right-click for Auto styles"));
+            if auto.clicked() {
                 let _ = app.run("develop.auto", json!({}));
                 app.toast(ui.ctx(), crate::i18n::tr("Auto settings applied"));
             }
+            auto.context_menu(|ui| {
+                for (style, label) in [
+                    ("natural", "Natural"),
+                    ("bright", "Bright & Airy"),
+                    ("punchy", "Punchy"),
+                    ("highlights", "Preserve Highlights"),
+                    ("film", "Film (Low Contrast)"),
+                ] {
+                    if ui.button(crate::i18n::tr(label)).clicked() {
+                        let _ = app.run("develop.auto", json!({"style": style}));
+                        app.toast(ui.ctx(), crate::i18n::tr("Auto settings applied"));
+                        ui.close();
+                    }
+                }
+            });
             let bw = crate::is_bw(&d);
             if text_button(ui, "bw", crate::i18n::tr("B&W"), bw).clicked() {
                 let _ = app.run("develop.treatment", json!({}));

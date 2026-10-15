@@ -13,6 +13,28 @@ fn active(s: &Session, c: &str) -> Result<PhotoId> {
 }
 
 /// Modify the active photo's settings with `f` and commit (or preview during an interaction).
+/// Faces for Auto in the photo as it renders now (crop applied), when a face detector is installed; none
+/// otherwise (Auto then finds the subject from the pixels alone).
+fn auto_faces(s: &mut Session, id: PhotoId) -> Vec<[f32; 4]> {
+    let Ok(detector) = super::face_detect::detector(s) else { return Vec::new() };
+    let Ok(r) = s.render_now(id, 640, 640) else { return Vec::new() };
+    let rgb: Vec<u8> = r.image.data.iter().flat_map(|p| [p[0], p[1], p[2]]).collect();
+    detector
+        .detect(&rgb, r.image.width, r.image.height, &lightcraft_faces::yunet::Options::default())
+        .map(|faces| faces.iter().map(|f| [f.x0, f.y0, f.x1, f.y1]).collect())
+        .unwrap_or_default()
+}
+
+/// Exposure time in seconds from the catalog's shutter text (`1/250`, `0.5`, `2`, `2"`).
+fn shutter_seconds(s: &str) -> Option<f64> {
+    let s = s.trim().trim_end_matches(['"', 's']).trim();
+    let t = match s.split_once('/') {
+        Some((n, d)) => n.trim().parse::<f64>().ok()? / d.trim().parse::<f64>().ok()?,
+        None => s.parse::<f64>().ok()?,
+    };
+    (t.is_finite() && t > 0.0).then_some(t)
+}
+
 fn edit(s: &mut Session, c: &str, label: &str, f: impl FnOnce(&mut DevelopSettings) -> Result<()>) -> Result<Value> {
     let id = active(s, c)?;
     let mut d = (*s.develop_of(id).unwrap_or_default()).clone();
@@ -376,25 +398,43 @@ pub fn specs() -> Vec<CommandSpec> {
                 Ok(json!({"mix": m}))
             }
         ),
-        cmd!("develop.auto", "Auto Settings", ["Photo"], Some("Shift+A"), "{}", has_active, |s, _| {
-            let id = active(s, "develop.auto")?;
-            let src = s.source_now(id, SourceLevel::Thumb).map_err(|e| bad("develop.auto", e))?;
-            let info = s.source_info(id);
-            let d = s.develop_of(id).unwrap_or_default();
-            let a = lightcraft_pipeline::auto::auto_tone(&src, &info, &d);
-            edit(s, "develop.auto", "Auto", |d| {
-                d.light.exposure = a.exposure;
-                d.light.contrast = a.contrast;
-                d.light.highlights = a.highlights;
-                d.light.shadows = a.shadows;
-                d.light.whites = a.whites;
-                d.light.blacks = a.blacks;
-                d.color.vibrance = a.vibrance;
-                d.color.saturation = a.saturation;
-                Ok(())
-            })?;
-            Ok(serde_json::to_value(a).unwrap_or_default())
-        }),
+        cmd!(
+            "develop.auto",
+            "Auto Settings",
+            ["Photo"],
+            Some("Shift+A"),
+            "{\"style\"?: \"natural\" | \"bright\" | \"punchy\" | \"highlights\" | \"film\"}",
+            has_active,
+            |s, p| {
+                use lightcraft_pipeline::auto::{Capture, Style};
+                let id = active(s, "develop.auto")?;
+                let style = match str_param(p, "style") {
+                    Some(name) => Style::from_name(name).ok_or_else(|| bad("develop.auto", format!("unknown style `{name}`")))?,
+                    None => Style::default(),
+                };
+                let mut capture = s.catalog.photo(id).map_or_else(Capture::default, |ph| {
+                    let m = &ph.meta;
+                    Capture::from_exif(m.aperture.map(f64::from), shutter_seconds(&m.shutter), m.iso.map(f64::from))
+                });
+                capture.faces = auto_faces(s, id);
+                let src = s.source_now(id, SourceLevel::Thumb).map_err(|e| bad("develop.auto", e))?;
+                let info = s.source_info(id);
+                let d = s.develop_of(id).unwrap_or_default();
+                let a = lightcraft_pipeline::tone_auto::auto_tone(&src, &info, &d, style, capture);
+                edit(s, "develop.auto", "Auto", |d| {
+                    d.light.exposure = a.exposure;
+                    d.light.contrast = a.contrast;
+                    d.light.highlights = a.highlights;
+                    d.light.shadows = a.shadows;
+                    d.light.whites = a.whites;
+                    d.light.blacks = a.blacks;
+                    d.color.vibrance = a.vibrance;
+                    d.color.saturation = a.saturation;
+                    Ok(())
+                })?;
+                Ok(serde_json::to_value(a).unwrap_or_default())
+            }
+        ),
         cmd!(
             "develop.wb",
             "White Balance",

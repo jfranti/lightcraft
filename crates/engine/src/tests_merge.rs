@@ -46,7 +46,7 @@ fn hdr_merge_command_creates_and_imports_a_dng() {
     assert_eq!(p.kind, lightcraft_catalog::MediaKind::Raw);
     assert_eq!(s.selection.active, Some(id));
     let d = s.develop_of(id).unwrap();
-    assert!(d.light.exposure != 0.0 || d.light.highlights != 0.0, "auto settings applied");
+    assert!(d.light != lightcraft_develop::Light::default(), "auto settings applied");
     let img = s.render_now(id, 256, 256).unwrap();
     assert_eq!(img.image.width, 256);
     // Create Stack: the result tops a collapsed stack of its sources, so the grid shows the result
