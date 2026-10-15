@@ -111,8 +111,16 @@ impl ToneMap {
     /// gain map only lifts highlights), then the highlights gain up to `peak − 1` more as in
     /// [`ToneMap::hdr`].
     pub fn camera_hdr(curve: &CameraTone, contrast: f64, whites: f64, blacks: f64, peak: f32) -> ToneMap {
+        Self::camera_with(curve, contrast, whites, blacks, peak, Self::display(contrast, whites, blacks))
+    }
+
+    /// [`ToneMap::camera_hdr`] with process V3's Whites and Blacks ([`end_points_v3`]).
+    pub fn camera_hdr_v3(curve: &CameraTone, contrast: f64, whites: f64, blacks: f64, peak: f32) -> ToneMap {
+        Self::camera_with(curve, contrast, whites, blacks, peak, Self::display_hdr_v3(contrast, whites, blacks, 1.0))
+    }
+
+    fn camera_with(curve: &CameraTone, contrast: f64, whites: f64, blacks: f64, peak: f32, adjustment: ToneMap) -> ToneMap {
         let peak = if peak.is_finite() { peak.max(1.0) } else { 1.0 };
-        let adjustment = Self::display(contrast, whites, blacks);
         let neutral = contrast == 0.0 && whites == 0.0 && blacks == 0.0;
         let top = (2.9 - 1.6 * (whites as f32 / 100.0) + peak.log2() + 1.0).max(HDR_FROM_EV + 0.5);
         let lut = (0..LUT_N)
@@ -181,6 +189,30 @@ impl ToneMap {
     /// source, e.g. a decoded gain-map image) pass through and roll off softly towards `peak`
     /// instead of clipping at 1; SDR sources (≤ 1) render as with [`ToneMap::display`].
     pub fn display_hdr(contrast: f64, whites: f64, blacks: f64, peak: f32) -> ToneMap {
+        Self::display_with(contrast, whites, blacks, peak, false)
+    }
+
+    /// [`ToneMap::display_hdr`] with process V3's Whites and Blacks ([`end_points_v3`]).
+    pub fn display_hdr_v3(contrast: f64, whites: f64, blacks: f64, peak: f32) -> ToneMap {
+        Self::display_with(contrast, whites, blacks, peak, true)
+    }
+
+    /// [`ToneMap::hdr`] (a raw without a camera look) with process V3's Whites and Blacks: the
+    /// curve's own white point stays put, and [`end_points_v3`] moves the ends on its output.
+    pub fn hdr_v3(contrast: f64, whites: f64, blacks: f64, peak: f32) -> ToneMap {
+        let mut t = Self::hdr(contrast, 0.0, 0.0, peak);
+        let (w, b) = ((whites / 100.0) as f32, (blacks / 100.0) as f32);
+        if w != 0.0 || b != 0.0 {
+            for o in &mut t.lut {
+                if *o <= 1.0 {
+                    *o = end_points_v3(o.max(0.0).powf(1.0 / 2.2), w, b).max(0.0).powf(2.2).min(1.0);
+                }
+            }
+        }
+        t
+    }
+
+    fn display_with(contrast: f64, whites: f64, blacks: f64, peak: f32, v3: bool) -> ToneMap {
         let peak = if peak.is_finite() { peak.max(1.0) } else { 1.0 };
         let c = (contrast / 100.0) as f32;
         let w = (whites / 100.0) as f32;
@@ -194,13 +226,17 @@ impl ToneMap {
                 if p <= 1.0 {
                     // S-curve anchored at 0, grey and 1
                     p += c * 0.35 * (p - m) * (1.0 - (2.0 * p - 1.0).powi(2));
-                    // whites: lift/lower the upper tones; blacks: the lower tones
-                    let up = smooth(0.45, 1.0, p);
-                    p += w * 0.12 * up * (1.0 - p * 0.5);
-                    let lo = 1.0 - smooth(0.0, 0.45, p);
-                    p += b * 0.07 * lo * (p * 2.0).min(1.0);
+                    if v3 {
+                        p = end_points_v3(p, w, b);
+                    } else {
+                        // whites: lift/lower the upper tones; blacks: the lower tones
+                        let up = smooth(0.45, 1.0, p);
+                        p += w * 0.12 * up * (1.0 - p * 0.5);
+                        let lo = 1.0 - smooth(0.0, 0.45, p);
+                        p += b * 0.07 * lo * (p * 2.0).min(1.0);
+                    }
                 } else {
-                    p += w * 0.12 * 0.5;
+                    p += if v3 { w * WHITES_V3 } else { w * 0.12 * 0.5 };
                 }
                 let mut o = p.max(0.0).powf(2.2);
                 // short shoulder: slope 1 at 0.95, reaching 1.0 at 1.05
@@ -261,9 +297,42 @@ fn smooth(e0: f32, e1: f32, x: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
+/// Process V3's Whites at ±100: how far the white end moves, in gamma-2.2 display units.
+const WHITES_V3: f32 = 0.16;
+/// Process V3's Blacks at ±100: how far the black end moves (lifted to L* ≈ 8.5 at +100; at −100
+/// everything below that is crushed to black).
+const BLACKS_V3: f32 = 0.12;
+
+/// Process V3's Whites and Blacks on a gamma-2.2 display value `p` (`whites`, `blacks` in −1..1).
+/// Each acts on its own end only — Whites from about L* 59 up, Blacks from about L* 38 down — and
+/// moves the end point itself (Whites +100 brings white well into clipping, Blacks −100 crushes the
+/// darkest tones), so the midtones don't move and a slider reaches what its name says. Monotone for
+/// every setting.
+pub fn end_points_v3(p: f32, whites: f32, blacks: f32) -> f32 {
+    let p = p + whites * WHITES_V3 * smooth(0.55, 1.0, p);
+    p + blacks * BLACKS_V3 * (1.0 - smooth(0.0, 0.35, p))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn v3_end_points_leave_the_midtones_and_reach_the_ends() {
+        let m = GREY.powf(1.0 / 2.2);
+        for (w, b) in [(1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0), (1.0, -1.0)] {
+            assert!((end_points_v3(m, w, b) - m).abs() < 0.01, "grey moved: {w} {b}");
+            // monotone
+            let mut prev = f32::MIN;
+            for i in 0..=200 {
+                let v = end_points_v3(i as f32 / 200.0, w, b);
+                assert!(v >= prev - 1e-6, "{w} {b} at {i}");
+                prev = v;
+            }
+        }
+        assert!(end_points_v3(1.0, -1.0, 0.0) < 0.86 && end_points_v3(0.9, 1.0, 0.0) > 1.0);
+        assert!(end_points_v3(0.0, 0.0, 1.0) > 0.1 && end_points_v3(0.08, 0.0, -1.0) < 0.0);
+    }
 
     fn knots() -> [[f32; 2]; 32] {
         std::array::from_fn(|i| {

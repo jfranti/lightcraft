@@ -273,17 +273,28 @@ pub fn base_detail_radius(px_per_long: f64) -> usize {
 pub fn tone_base_detail(s: &DevelopSettings, px_per_long: f64) -> usize {
     match s.process.process() {
         Process::V1 => 0,
-        Process::V2 => base_detail_radius(px_per_long),
+        Process::V2 | Process::V3 => base_detail_radius(px_per_long),
     }
 }
 
-/// The highlights/shadows base layer of log luminance `l`: the fast guided filter ([`BASE_EPS`])
-/// of its [`median_hv`] at `detail` px ([`tone_base_detail`]); at 0, of `l` itself (V1).
-pub fn tone_base(l: &Plane, sigma: f32, detail: usize) -> Plane {
-    if detail == 0 {
-        return guided_fast(l, sigma, BASE_EPS);
+/// The guided-filter epsilon (EV²) of the highlights/shadows base under `s`'s rendering process:
+/// [`BASE_EPS`] through V2; from V3 the smaller [`BASE_EPS_V3`], so the base keeps strong edges (a
+/// treeline against a bright sky) sharper and Highlights / Shadows don't leave a halo along them.
+pub fn tone_base_eps(s: &DevelopSettings) -> f32 {
+    match s.process.process() {
+        Process::V1 | Process::V2 => BASE_EPS,
+        Process::V3 => BASE_EPS_V3,
     }
-    guided_fast(&median_hv(l, detail), sigma, BASE_EPS)
+}
+
+/// The highlights/shadows base layer of log luminance `l`: the fast guided filter (`eps`,
+/// [`tone_base_eps`]) of its [`median_hv`] at `detail` px ([`tone_base_detail`]); at 0, of `l`
+/// itself (V1).
+pub fn tone_base(l: &Plane, sigma: f32, detail: usize, eps: f32) -> Plane {
+    if detail == 0 {
+        return guided_fast(l, sigma, eps);
+    }
+    guided_fast(&median_hv(l, detail), sigma, eps)
 }
 
 /// Subsampling step of [`guided_fast`] for `sigma` (1 = no subsampling: the plain guided filter).
@@ -423,6 +434,8 @@ pub fn plane_at<K: Copy + PartialEq, P>(slot: &mut Option<(K, Arc<P>)>, key: K, 
 
 /// Guided-filter epsilons (EV²) of the highlights/shadows base and the clarity band.
 pub const BASE_EPS: f32 = 0.35;
+/// [`BASE_EPS`] from process V3 ([`tone_base_eps`]).
+pub const BASE_EPS_V3: f32 = 0.08;
 pub const CLARITY_EPS: f32 = 0.8;
 
 /// Dark channel of a pixel (dehaze).
@@ -507,7 +520,7 @@ pub(crate) fn prepare(
     });
     let l = &log_l;
     let (base, (clarity_blur, (texture_blur, dark))) = par_join(
-        || base_sigma.map(|sg| plane_at(sb, base_key(s, sg, base_detail), || timed("base", || tone_base(l, sg, base_detail)))),
+        || base_sigma.map(|sg| plane_at(sb, base_key(s, sg, base_detail), || timed("base", || tone_base(l, sg, base_detail, tone_base_eps(s))))),
         || {
             par_join(
                 || clarity_sigma.map(|sg| plane_at(sc, sg.to_bits(), || timed("clarity", || guided_fast(l, sg, CLARITY_EPS)))),

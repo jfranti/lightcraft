@@ -183,11 +183,14 @@ pub struct DecodedSource {
     pub camera_tone: Option<lightcraft_pipeline::tone::CameraTone>,
     /// The same picture developed from the AI-denoised mosaic, when the photo has one cached.
     pub denoised: Option<Arc<Twin>>,
+    /// The picture's tonal levels ([`lightcraft_pipeline::finish::tone_levels`]), measured once when
+    /// first rendered and shared with the smaller sources fitted from it.
+    pub levels: Arc<std::sync::OnceLock<Option<[f32; 2]>>>,
 }
 
 impl DecodedSource {
     pub fn new(image: Arc<Rgb32f>, info: Option<SourceInfo>) -> Self {
-        DecodedSource { image, info, camera_tone: None, denoised: None }
+        DecodedSource { image, info, camera_tone: None, denoised: None, levels: Arc::default() }
     }
 
     /// The picture to develop for a Denoise `amount` (0 to 1, see [`DevelopSettings::denoise_amount`]): the plain one,
@@ -227,7 +230,11 @@ impl DecodedSource {
     /// What to render these pixels against: the decoder's facts, else `header` (the catalog's)
     /// with any stored camera tone curve.
     pub fn info_or(&self, header: SourceInfo) -> SourceInfo {
-        self.info.clone().unwrap_or_else(|| SourceInfo { camera_tone: self.camera_tone.or(header.camera_tone), ..header })
+        let mut info = self.info.clone().unwrap_or_else(|| SourceInfo { camera_tone: self.camera_tone.or(header.camera_tone), ..header });
+        if info.tone_levels.is_none() {
+            info.tone_levels = *self.levels.get_or_init(|| lightcraft_pipeline::finish::tone_levels(&self.image));
+        }
+        info
     }
 }
 
@@ -302,6 +309,7 @@ impl SourceRef {
                                     info: Some(info),
                                     camera_tone: None,
                                     denoised: twin.map(|t| Arc::new(Twin::new(Arc::new(t)))),
+                                    levels: Arc::default(),
                                 })
                             })
                         } else {

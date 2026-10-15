@@ -585,7 +585,7 @@ fn highlights_shadows_base_matches_on_every_process() {
             }];
             check(&format!("{p:?} local highlights {w}"), &src, &raw, &s, &req);
         }
-        for p in [Process::V1, Process::V2, Process::V1, Process::V2] {
+        for p in [Process::V1, Process::V2, Process::V3, Process::V1, Process::V2, Process::V3] {
             let mut s = DevelopSettings { process: p.version(), ..DevelopSettings::default() };
             s.light.highlights = -100.0;
             let warm = lightcraft_gpu::render(&src, &raw, &s, &req, Some(&cache)).expect("gpu");

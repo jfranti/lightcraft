@@ -204,7 +204,7 @@ fn v1_keeps_the_base_it_always_had() {
     let l =
         Plane::from_fn(301, 157, |x, y| (((x * 31 + y * 17) * 2_654_435_761usize) % 1000) as f32 / 250.0 - 2.0 + if x % 5 == 0 { 0.5 } else { 0.0 });
     for sg in [1.0f32, 4.5, 18.0] {
-        assert_eq!(local::tone_base(&l, sg, 0).data, local::guided_fast(&l, sg, local::BASE_EPS).data, "sigma {sg}");
+        assert_eq!(local::tone_base(&l, sg, 0, local::BASE_EPS).data, local::guided_fast(&l, sg, local::BASE_EPS).data, "sigma {sg}");
     }
     // V2 takes the median wherever the image is big enough for one
     let v2 = with("light.highlights", -100.0);

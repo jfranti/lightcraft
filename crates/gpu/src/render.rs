@@ -332,12 +332,12 @@ fn median_hv(cx: &mut Cx<'_>, p: &Buf, w: usize, h: usize, r: usize) -> Buf {
 }
 
 /// The highlights/shadows base (`local::tone_base`; `detail` 0: V1, no median).
-fn tone_base(cx: &mut Cx<'_>, l: &Buf, w: usize, h: usize, sigma: f32, detail: usize) -> Buf {
+fn tone_base(cx: &mut Cx<'_>, l: &Buf, w: usize, h: usize, sigma: f32, detail: usize, eps: f32) -> Buf {
     if detail == 0 {
-        return guided_fast(cx, l, w, h, sigma, local::BASE_EPS);
+        return guided_fast(cx, l, w, h, sigma, eps);
     }
     let m = median_hv(cx, l, w, h, detail);
-    guided_fast(cx, &m, w, h, sigma, local::BASE_EPS)
+    guided_fast(cx, &m, w, h, sigma, eps)
 }
 
 /// Fast guided filter (`local::guided_fast`): coefficients on a subsampled grid.
@@ -873,7 +873,7 @@ fn prepare(cx: &mut Cx<'_>, lin: &Buf, plan: &Plan<'_>, req: &RenderRequest, pla
     let base = match sig.base {
         Some(sg) => {
             let key = local::base_key(&plan.settings, sg, sig.base_detail);
-            plane_at(&mut planes.base, key, || tone_base(cx, &log_l, w, h, sg, sig.base_detail))
+            plane_at(&mut planes.base, key, || tone_base(cx, &log_l, w, h, sg, sig.base_detail, local::tone_base_eps(&plan.settings)))
         }
         None => log_l.clone(),
     };

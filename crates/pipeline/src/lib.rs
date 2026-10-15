@@ -92,6 +92,10 @@ pub struct SourceInfo {
     /// The raw's own local tone mapping (DNG `ProfileGainTableMap`), rendered only when the
     /// photo's Profile option asks for it ([`local_tone`]).
     pub local_tone: Option<Arc<local_tone::LocalTone>>,
+    /// The whole picture's tonal levels, log2 luminance over middle grey before Exposure at its 25th and
+    /// 85th percentiles ([`finish::tone_levels`]): process V3 places Shadows and Highlights by them
+    /// ([`finish::tone_mask`]), as Lightroom's image-adaptive sliders do. `None`: fixed ranges.
+    pub tone_levels: Option<[f32; 2]>,
 }
 
 impl Default for SourceInfo {
@@ -107,6 +111,7 @@ impl Default for SourceInfo {
             camera_tone: None,
             mattes: None,
             local_tone: None,
+            tone_levels: None,
         }
     }
 }

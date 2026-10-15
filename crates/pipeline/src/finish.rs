@@ -171,6 +171,9 @@ pub struct FinishParams {
     pub proof: Option<crate::output::ProofParams>,
     pub hl: f32,
     pub sh: f32,
+    /// Highlights/Shadows tonal ranges in EV over grey ([`tone_mask`]): Shadows fades out from
+    /// `[0]` to `[1]` and in from black at `[4]`, Highlights fades in from `[2]` to `[3]`.
+    pub tone_mask: [f32; 5],
     pub clar: f32,
     pub tex: f32,
     pub dehaze: f32,
@@ -240,6 +243,7 @@ impl FinishParams {
             proof: None,
             hl: (s.light.highlights / 100.0) as f32,
             sh: (s.light.shadows / 100.0) as f32,
+            tone_mask: tone_mask(s, info),
             clar,
             tex,
             dehaze,
@@ -270,6 +274,52 @@ impl FinishParams {
     }
 }
 
+/// The tonal ranges of Highlights and Shadows under `s`'s rendering process, in EV over middle grey
+/// of the edge-aware base: `[shadows full below, shadows gone at, highlights start, highlights
+/// full at, shadows reach black at]` (see [`FinishParams::tone_mask`]). V1/V2: fixed, Shadows
+/// reaching up past grey and Highlights down to 1 EV under it, so both move the overall exposure.
+/// V3: image adaptive, like Lightroom's: each range is centred on the picture's own shadows or
+/// highlights ([`SourceInfo::tone_levels`], moved by Exposure), within bounds that keep Shadows
+/// short of grey and Highlights from reaching far below it; Shadows fades out towards black, so it
+/// opens shadow detail without lifting the black point (Blacks' job).
+pub fn tone_mask(s: &DevelopSettings, info: &SourceInfo) -> [f32; 5] {
+    match s.process.process() {
+        Process::V1 | Process::V2 => [-4.8, 0.3, -1.0, 2.8, -100.0],
+        Process::V3 => {
+            // the picture's levels move with Exposure; without them the ranges sit at fixed places
+            // (so exposing the source and raising Exposure still render alike)
+            let [p25, p85] = info.tone_levels.map_or([-2.5, 1.0], |[a, b]| [a + s.light.exposure as f32, b + s.light.exposure as f32]);
+            let xs = p25.clamp(-4.0, -1.0);
+            let xh = p85.clamp(-0.5, 2.5);
+            [xs - 1.5, (xs + 1.2).min(-0.2), (xh - 1.0).max(-1.0), xh + 1.2, -5.5]
+        }
+    }
+}
+
+/// The tonal levels of `img` (scene-linear Rec.2020): log2 luminance over middle grey at the 25th and
+/// 85th percentiles, from up to ~250 000 evenly spread pixels (see [`SourceInfo::tone_levels`]).
+/// `None` without a valid pixel.
+pub fn tone_levels(img: &lightcraft_raster::Rgb32f) -> Option<[f32; 2]> {
+    let n = img.width * img.height;
+    let step = ((n as f64 / 250_000.0).sqrt().ceil() as usize).max(1);
+    let mut v: Vec<f32> = (0..img.height)
+        .step_by(step)
+        .flat_map(|y| (0..img.width).step_by(step).map(move |x| y * img.width + x))
+        .filter_map(|i| {
+            let l = lightcraft_color::luminance_2020(img.data[i]);
+            (l.is_finite() && l > 0.0).then(|| (l.max(1e-6) / 0.18).log2())
+        })
+        .collect();
+    if v.is_empty() {
+        return None;
+    }
+    let mut at = |p: f64| {
+        let k = ((v.len() - 1) as f64 * p) as usize;
+        *v.select_nth_unstable_by(k, f32::total_cmp).1
+    };
+    Some([at(0.25), at(0.85)])
+}
+
 /// The base tone map (scene → display luminance, with Contrast, Whites and Blacks) of `s`'s
 /// rendering process. This is where a new tone model branches: a retuned default tone curve (issue
 /// #146) is a new [`Process`] with its own arm here, and V1's arm stays as it is, so photos edited
@@ -285,6 +335,12 @@ pub fn base_tone(s: &DevelopSettings, info: &SourceInfo, peak: f32) -> ToneMap {
             Some(curve) => ToneMap::camera_hdr(curve, l.contrast, l.whites, l.blacks, peak),
             None if info.raw => ToneMap::hdr(l.contrast, l.whites, l.blacks, peak),
             None => ToneMap::display_hdr(l.contrast, l.whites, l.blacks, peak),
+        },
+        // V3: Whites and Blacks keep to the end points (`tone::end_points_v3`)
+        Process::V3 => match info.camera_tone.as_ref().filter(|_| info.raw) {
+            Some(curve) => ToneMap::camera_hdr_v3(curve, l.contrast, l.whites, l.blacks, peak),
+            None if info.raw => ToneMap::hdr_v3(l.contrast, l.whites, l.blacks, peak),
+            None => ToneMap::display_hdr_v3(l.contrast, l.whites, l.blacks, peak),
         },
     }
 }
@@ -374,6 +430,7 @@ pub(crate) fn finish_with<T: Copy + Default + Send>(
         out_luma,
         hl,
         sh,
+        tone_mask,
         clar,
         tex,
         dehaze,
@@ -388,6 +445,7 @@ pub(crate) fn finish_with<T: Copy + Default + Send>(
     } = fp;
     let (hl, sh, clar, tex, dehaze, sharpen, sharpen_mask, air, air_pre, gain, ev) =
         (*hl, *sh, *clar, *tex, *dehaze, *sharpen, *sharpen_mask, *air, *air_pre, *gain, *ev);
+    let tm = *tone_mask;
     let terms: Vec<[f32; MASK_TERMS]> = p.masks.iter().map(|m| mask_terms(&m.adjust)).collect();
     let out_to_norm = fp.out_to_norm;
     let long = fp.ow.max(fp.oh);
@@ -479,8 +537,8 @@ pub(crate) fn finish_with<T: Copy + Default + Send>(
             let mut delta = 0.0f32;
             let (hh, ss) = (hl + l_hl, sh + l_sh);
             if hh != 0.0 || ss != 0.0 {
-                let ws = 1.0 - smooth(-4.8, 0.3, base);
-                let wh = smooth(-1.0, 2.8, base);
+                let ws = (1.0 - smooth(tm[0], tm[1], base)) * smooth(tm[4] - 3.0, tm[4], base);
+                let wh = smooth(tm[2], tm[3], base);
                 delta += ss * 1.7 * ws * ws.sqrt() + hh * 1.7 * wh;
             }
             if l_wh != 0.0 {

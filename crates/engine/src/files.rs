@@ -496,6 +496,8 @@ fn load_bytes_now(
                 camera_tone,
                 mattes,
                 local_tone,
+                // measured from the pixels when first rendered (`DecodedSource::levels`)
+                tone_levels: None,
             },
         ));
     }
