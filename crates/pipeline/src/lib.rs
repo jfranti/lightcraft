@@ -28,6 +28,7 @@ pub mod blemish;
 pub mod colorops;
 pub mod cull;
 pub mod dust;
+pub mod film;
 pub mod film_seed;
 pub mod finish;
 pub mod geometry;
@@ -374,6 +375,8 @@ pub struct Plan<'a> {
     /// [`Self::lin_key`] without the noise-reduction settings: draft renders reuse the smooth
     /// planes of an image that differs from this one only in its noise reduction.
     pub pre_nr_key: u64,
+    /// The Film section's halation (`film::halation`: strength, sigma, threshold), if any.
+    pub halation: Option<[f32; 3]>,
     /// Red eye / pet eye corrections with their detected pupils, in output pixels.
     pub eyes: Vec<redeye::EyeK>,
     /// The whole frame's dehaze airlight, for a windowed render (which can't see the whole frame).
@@ -445,8 +448,16 @@ pub fn plan<'a>(src: &Rgb32f, info: &SourceInfo, s: &'a DevelopSettings, req: &R
         local_tone::enabled(info, s),
         src_long,
     ));
-    let lin_key = hash_of((pre_nr_key, [d.nr_luminance, d.nr_detail, d.nr_color, d.nr_color_detail, d.nr_color_smoothness].map(f64::to_bits)));
-    Plan { settings, frame, w, h, px_per_long, src_long, geo, lin_key, pre_nr_key, eyes, fixed_air, keep, mattes: info.mattes.clone() }
+    // (the Film section's sharpness blurs this stage's result)
+    let film_mtf = film::mtf_sigma(&settings.film, px_per_long);
+    let halation = film::halation(&settings.film, px_per_long, finish::film_scale(&settings, info));
+    let lin_key = hash_of((
+        pre_nr_key,
+        [d.nr_luminance, d.nr_detail, d.nr_color, d.nr_color_detail, d.nr_color_smoothness].map(f64::to_bits),
+        film_mtf.to_bits(),
+        halation.map(|h| h.map(f32::to_bits)),
+    ));
+    Plan { settings, frame, w, h, px_per_long, src_long, geo, lin_key, pre_nr_key, halation, eyes, fixed_air, keep, mattes: info.mattes.clone() }
 }
 
 /// Whether the scene-linear stage needs work only the CPU does (defringe, spot removal).
@@ -566,6 +577,15 @@ fn render_impl(src: Src<'_>, info: &SourceInfo, s: &DevelopSettings, req: &Rende
             let mut img = if shared.is_some() { (*sampled).clone() } else { Arc::unwrap_or_clone(sampled.clone()) };
             lin_cpu(&mut img, info, &plan);
             local::denoise(&mut img, s, src_long, frame.output_long(w, h));
+            // the film's sharpness (MTF): the negative and print resolve less than the sensor
+            let sigma = film::mtf_sigma(&s.film, px_per_long);
+            if sigma >= 0.3 {
+                img = lightcraft_raster::blur::gaussian(&img, sigma);
+            }
+            // and its halation: the brightest light back off the film base
+            if let Some(h) = plan.halation {
+                film::add_halation(&mut img, h);
+            }
             Arc::new(img)
         }
     };

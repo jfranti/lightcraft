@@ -252,6 +252,101 @@ fn out_encode(v: f32) -> f32 {
     return 1.099 * pow(l, 0.45) - 0.099;
 }
 
+// --- Film (`lightcraft_pipeline::film::Model::render`): FILM_W holds `Model::gpu_words`.
+fn fw(k: u32) -> f32 {
+    return pf(F_FILM_W + k);
+}
+
+// channel `i`'s word `o`: negative k, mid, range, printer light, print k, mid, range, dyes row (3), base
+fn fch(i: u32, o: u32) -> f32 {
+    return fw(10u + 11u * i + o);
+}
+
+fn film_curve(k: f32, mid: f32, range: f32, x: f32) -> f32 {
+    return range / (1.0 + exp(-k * (x - mid)));
+}
+
+fn film_exposure(c: vec3<f32>) -> vec3<f32> {
+    var l: vec3<f32>;
+    if (fw(1u) != 0.0) {
+        l = vec3<f32>(fw(2u) * c.x + fw(3u) * c.y + fw(4u) * c.z);
+    } else {
+        l = vec3<f32>(
+            1.3303 * c.x - 0.2938 * c.y - 0.0364 * c.z,
+            -0.0623 * c.x + 1.0665 * c.y - 0.0042 * c.z,
+            -0.0091 * c.x - 0.0503 * c.y + 1.0594 * c.z,
+        );
+    }
+    // the film's balance to the photo (`Model::gain`, the last word)
+    var x = log(max(l * fw(43u), vec3<f32>(1e-6)) / 0.18) / 2.3025851;
+    if (fw(5u) != 0.0) {
+        for (var i = 0u; i < 3u; i++) {
+            if (x[i] > 0.3) {
+                x[i] = 0.3 + (x[i] - 0.3) / (1.0 + (x[i] - 0.3) / 0.9);
+            }
+        }
+    }
+    return x;
+}
+
+fn film_neg_raw(i: u32, x: f32) -> f32 {
+    return film_curve(fch(i, 0u), fch(i, 1u), fch(i, 2u), x);
+}
+
+fn film_interlayer(d: vec3<f32>) -> vec3<f32> {
+    let mean = (d.x + d.y + d.z) / 3.0;
+    return d + fw(7u) * (d - vec3<f32>(mean));
+}
+
+fn film_display(x: vec3<f32>, grain: vec3<f32>) -> vec3<f32> {
+    var p: vec3<f32>;
+    if (fw(0u) != 0.0) {
+        var d: vec3<f32>;
+        for (var i = 0u; i < 3u; i++) {
+            d[i] = fch(i, 6u) - film_curve(fch(i, 4u), fch(i, 5u), fch(i, 6u), x[i]);
+        }
+        p = max(max(film_interlayer(d), vec3<f32>(0.0)) - grain, vec3<f32>(0.0));
+    } else {
+        let neg = film_interlayer(vec3<f32>(film_neg_raw(0u, x.x), film_neg_raw(1u, x.y), film_neg_raw(2u, x.z))) + grain;
+        for (var i = 0u; i < 3u; i++) {
+            p[i] = film_curve(fch(i, 4u), fch(i, 5u), fch(i, 6u), fch(i, 3u) - neg[i]);
+        }
+    }
+    var o: vec3<f32>;
+    for (var i = 0u; i < 3u; i++) {
+        let pd = fch(i, 7u) * p.x + fch(i, 8u) * p.y + fch(i, 9u) * p.z;
+        o[i] = exp2(-max(pd - fch(i, 10u), 0.0) * 3.3219281);
+    }
+    return o;
+}
+
+fn film_grain_for(x: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
+    if (fw(8u) <= 0.0) {
+        return vec3<f32>(0.0);
+    }
+    var g: vec3<f32>;
+    for (var i = 0u; i < 3u; i++) {
+        let t = clamp(film_neg_raw(i, x[i]) / fch(i, 2u), 0.0, 1.0);
+        g[i] = fw(8u) * (0.35 + 0.65 * (4.0 * t * (1.0 - t))) * n[i];
+    }
+    return g;
+}
+
+fn film_render(c: vec3<f32>, grain: vec3<f32>) -> vec3<f32> {
+    let o = film_display(film_exposure(c), grain);
+    var d = vec3<f32>(
+        0.6274 * o.x + 0.3293 * o.y + 0.0433 * o.z,
+        0.0691 * o.x + 0.9195 * o.y + 0.0114 * o.z,
+        0.0164 * o.x + 0.0880 * o.y + 0.8956 * o.z,
+    );
+    if (fw(6u) != 0.0) {
+        let y = lum2020(d);
+        let w = 0.35 * (1.0 - sstep(0.02, 0.15, y)) + 0.35 * sstep(0.55, 0.95, y);
+        d = d + (vec3<f32>(y) - d) * w;
+    }
+    return d;
+}
+
 @compute @workgroup_size(16, 16)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let w = pu(F_W);
@@ -406,21 +501,44 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         c = calibrate(c);
     }
 
-    // --- tone map on luminance, highlight desaturation
-    let yl = lum2020(c);
-    let o = tone_apply(yl);
     var d = vec3<f32>(0.0);
-    if (yl > 1e-9) {
-        d = c * o / yl;
-    }
-    let k = chroma_scale(o);
-    if (k != 1.0) {
-        d = vec3<f32>(o) + (d - vec3<f32>(o)) * k;
-    }
-    let mx = max(d.x, max(d.y, d.z));
-    if (mx > 1.0) {
-        let t = clamp((mx - 1.0) / max(mx - o, 1e-6), 0.0, 1.0);
-        d = d + (o - d) * t;
+    if (pu(F_FILM) != 0u) {
+        // --- film: negative, grain in its density, print (instead of the camera tone curve)
+        let ex = film_exposure(c);
+        var gr = vec3<f32>(0.0);
+        if (fw(8u) > 0.0) {
+            let gpx = f32(x) + 0.5;
+            let gpy = f32(y) + 0.5;
+            let gx = pf(F_GRAIN_AFF) * gpx + pf(F_GRAIN_AFF + 2u) * gpy + pf(F_GRAIN_AFF + 4u);
+            let gy = pf(F_GRAIN_AFF + 1u) * gpx + pf(F_GRAIN_AFF + 3u) * gpy + pf(F_GRAIN_AFF + 5u);
+            let sc = fw(9u);
+            // mostly shared between the layers (film grain reads as luminance), a little each its own
+            let gn0 = grain_noise(gx * sc, gy * sc, 0x3C6EF372u);
+            var nz = vec3<f32>(gn0);
+            if (fw(1u) == 0.0) {
+                for (var k = 0u; k < 3u; k++) {
+                    nz[k] = 0.85 * gn0 + 0.4 * grain_noise(gx * sc, gy * sc, 0x9E3779B9u ^ (k + 1u));
+                }
+            }
+            gr = film_grain_for(ex, nz);
+        }
+        d = film_render(c, gr);
+    } else {
+        // --- tone map on luminance, highlight desaturation
+        let yl = lum2020(c);
+        let o = tone_apply(yl);
+        if (yl > 1e-9) {
+            d = c * o / yl;
+        }
+        let k = chroma_scale(o);
+        if (k != 1.0) {
+            d = vec3<f32>(o) + (d - vec3<f32>(o)) * k;
+        }
+        let mx = max(d.x, max(d.y, d.z));
+        if (mx > 1.0) {
+            let t = clamp((mx - 1.0) / max(mx - o, 1e-6), 0.0, 1.0);
+            d = d + (o - d) * t;
+        }
     }
 
     // --- colour

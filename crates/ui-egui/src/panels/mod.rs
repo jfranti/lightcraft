@@ -10,6 +10,7 @@ pub mod detail;
 pub mod dialogs;
 pub mod edit;
 pub mod faces;
+pub mod film;
 pub mod filterbar;
 pub mod grid;
 pub mod keymap;

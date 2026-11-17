@@ -37,11 +37,22 @@ pub enum RightPanel {
     Info,
     /// The profile browser (part of Edit).
     Profiles,
+    /// Film: a film stock's scene-referred rendering (negative, print, grain, sharpness) and film LUT looks.
+    Film,
 }
 
 impl RightPanel {
     pub fn is_edit_tool(self) -> bool {
-        matches!(self, RightPanel::Edit | RightPanel::Profiles | RightPanel::Crop | RightPanel::Remove | RightPanel::Masking | RightPanel::RedEye)
+        matches!(
+            self,
+            RightPanel::Edit
+                | RightPanel::Profiles
+                | RightPanel::Film
+                | RightPanel::Crop
+                | RightPanel::Remove
+                | RightPanel::Masking
+                | RightPanel::RedEye
+        )
     }
 }
 

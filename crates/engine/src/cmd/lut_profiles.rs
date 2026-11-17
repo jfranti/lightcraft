@@ -138,33 +138,66 @@ fn import(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(json!({"imported": imported, "failed": failed}))
 }
 
-/// `profile.generate`: a seeded film look (`lightcraft_pipeline::film_seed`) added as a profile in the
-/// "Seeded Film" group, the same way an imported `.cube` is; `path` also saves the `.cube` there.
+/// `profile.generate`: a film look (`lightcraft_pipeline::film_seed`) — a seed's, or a film stock's — added
+/// as a profile in the "Seeded Film" or "Film Stocks" group, the same way an imported `.cube` is (a look
+/// already there is reused); `path` also saves the `.cube` there, `apply` puts it on the active photo.
 fn generate(s: &mut Session, p: &Value) -> Result<Value> {
     const C: &str = "profile.generate";
-    use lightcraft_pipeline::film_seed::FilmParams;
-    let seed = match p.get("seed") {
-        Some(v) => v.as_u64().or_else(|| v.as_str().and_then(|t| t.trim().parse().ok())).ok_or_else(|| bad(C, "seed must be a whole number"))?,
-        // no seed: a fresh one from the clock, kept short enough to read out and share
-        None => std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(1, |d| d.as_nanos() as u64 % 1_000_000),
+    use lightcraft_pipeline::film_seed::{FilmParams, stock};
+    let (look, group, file, seed) = match str_param(p, "stock") {
+        Some(id) => {
+            let look = stock(id).ok_or_else(|| bad(C, format!("unknown film stock `{id}` (see profile.stocks)")))?;
+            (look, "Film Stocks", format!("{id}.cube"), None)
+        }
+        None => {
+            let seed = match p.get("seed") {
+                Some(v) => {
+                    v.as_u64().or_else(|| v.as_str().and_then(|t| t.trim().parse().ok())).ok_or_else(|| bad(C, "seed must be a whole number"))?
+                }
+                // no seed: a fresh one from the clock, kept short enough to read out and share
+                None => std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(1, |d| d.as_nanos() as u64 % 1_000_000),
+            };
+            (FilmParams::from_seed(seed), "Seeded Film", format!("film-{seed}.cube"), Some(seed))
+        }
     };
     let size = p.get("size").and_then(Value::as_u64).unwrap_or(33).clamp(9, 65) as usize;
-    let look = FilmParams::from_seed(seed);
     let cube = look.lut(size).to_cube();
     if let Some(path) = str_param(p, "path") {
         std::fs::write(path, &cube).map_err(|e| bad(C, format!("{path}: {e}")))?;
     }
-    // through the import path (the library keeps its own copy), from a folder named for the group
-    let root = std::env::temp_dir().join(format!("lightcraft-seeded-{}-{seed}", std::process::id()));
-    let dir = root.join("Seeded Film");
-    std::fs::create_dir_all(&dir).map_err(|e| bad(C, e.to_string()))?;
-    std::fs::write(dir.join(format!("film-{seed}.cube")), &cube).map_err(|e| bad(C, e.to_string()))?;
-    let r = import(s, &json!({"paths": [dir.to_string_lossy()]}));
-    let _ = std::fs::remove_dir_all(&root);
-    let mut r = r?;
+    let name = look.name();
+    let mut r = match s.lut_profiles.iter().find(|x| x.group == group && x.name == name) {
+        // made before: the same look, so the profile there is reused
+        Some(x) => json!({"imported": [{"id": x.id, "name": x.name, "group": x.group}], "failed": []}),
+        // through the import path (the library keeps its own copy), from a folder named for the group
+        None => {
+            let root = std::env::temp_dir().join(format!("lightcraft-film-{}-{}", std::process::id(), file.trim_end_matches(".cube")));
+            let dir = root.join(group);
+            std::fs::create_dir_all(&dir).map_err(|e| bad(C, e.to_string()))?;
+            std::fs::write(dir.join(&file), &cube).map_err(|e| bad(C, e.to_string()))?;
+            let r = import(s, &json!({"paths": [dir.to_string_lossy()]}));
+            let _ = std::fs::remove_dir_all(&root);
+            r?
+        }
+    };
     r["seed"] = json!(seed);
     r["archetype"] = json!(look.archetype.name());
     r["look"] = serde_json::to_value(&look).unwrap_or_default();
+    // the stock's grain and softness: a LUT carries colour only
+    let tx = look.texture;
+    let texture = json!({
+        "grain": {"amount": tx.grain_amount, "size": tx.grain_size, "roughness": tx.grain_roughness},
+        "effects": {"texture": tx.texture},
+    });
+    r["texture"] = texture.clone();
+    if p.get("apply").and_then(Value::as_bool).unwrap_or(false)
+        && let Some(id) = r["imported"].get(0).and_then(|i| i["id"].as_str()).map(str::to_string)
+    {
+        // the look as one edit: its profile, grain and texture
+        let mut settings = texture;
+        settings["profile"] = json!({"id": id, "amount": 100.0});
+        s.execute("develop.merge", &json!({"settings": settings, "label": format!("Film look: {}", look.name())}))?;
+    }
     Ok(r)
 }
 
@@ -175,10 +208,14 @@ pub fn specs() -> Vec<CommandSpec> {
             "Generate Film Look",
             [],
             None,
-            "{seed?: number (a fresh one when omitted), size?: 9..65 (33), path?: also save the .cube there} — a seeded film look (print, slide, negative, faded, cross-process or bleach bypass) as a creative profile in the Seeded Film group; the same seed always gives the same look → {imported: [{id, name, group}], seed, archetype, look}",
+            "{seed?: number (a fresh one when omitted) | stock?: film stock id (profile.stocks), size?: 9..65 (33), path?: also save the .cube there, apply?: bool (apply it to the active photo: profile, grain and texture as one edit)} — a film look as a creative profile plus the film's grain and softness: a seed's (print, slide, negative, faded, cross-process or bleach bypass, with a stock speed and gauge; Seeded Film group; the same seed always gives the same look) or a film stock's (Film Stocks group) → {imported: [{id, name, group}], seed, archetype, look, texture}",
             always,
             generate
         ),
+        cmd!(query "profile.stocks", "Film Stocks", [], None, "{} → {stocks: [{id, name}]} — the film stocks profile.generate knows", always, |_, _| {
+            let stocks: Vec<Value> = lightcraft_pipeline::film_seed::STOCKS.iter().map(|(id, name)| json!({"id": id, "name": name})).collect();
+            Ok(json!({"stocks": stocks}))
+        }),
         cmd!(
             "profile.import",
             "Import Profiles",

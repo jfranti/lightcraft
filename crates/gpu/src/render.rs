@@ -815,7 +815,26 @@ fn linear(cx: &mut Cx<'_>, sampled: &Buf, info: &SourceInfo, plan: &Plan<'_>, ho
             eyed
         }
     };
-    denoise(cx, img, plan)
+    let img = denoise(cx, img, plan);
+    film_linear(cx, img, plan)
+}
+
+/// The Film section's sharpness (MTF blur) and halation on the scene-linear image, as the CPU's linear
+/// stage does them (`lightcraft_pipeline::film::{mtf_sigma, halation, add_halation}`).
+fn film_linear(cx: &mut Cx<'_>, img: Buf, plan: &Plan<'_>) -> Buf {
+    let (w, h) = (plan.w, plan.h);
+    let film = &plan.settings.film;
+    let sigma = lightcraft_pipeline::film::mtf_sigma(film, plan.px_per_long);
+    let img = if sigma >= 0.3 { gaussian(cx, &img, w, h, 3, sigma) } else { img };
+    let Some([strength, sigma, threshold]) = plan.halation else { return img };
+    let n = w * h;
+    let bright = cx.gpu.buffer(n * 3);
+    map(cx, "halation_bright_k", n, &[threshold.to_bits()], [Some(&img), None, None], &bright);
+    let near = gaussian(cx, &bright, w, h, 3, sigma);
+    let far = gaussian(cx, &bright, w, h, 3, sigma * 3.0);
+    let out = cx.gpu.buffer(n * 3);
+    map(cx, "halation_add_k", n, &[strength.to_bits()], [Some(&img), Some(&near), Some(&far)], &out);
+    out
 }
 
 /// Noise reduction (`local::denoise`).

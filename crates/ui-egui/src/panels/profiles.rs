@@ -97,6 +97,16 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
         if resp.clicked() {
             ui.data_mut(|m| m.insert_temp(open_id, !open));
         }
+        // an imported group (a .cube folder, Seeded Film) can be cleared in one go
+        if imported {
+            let ids: Vec<String> = list.iter().map(|p| p.0.clone()).collect();
+            resp.context_menu(|ui| {
+                if ui.button(crate::i18n::tr("Delete All in Group")).clicked() {
+                    delete_profiles(app, ui.ctx(), &d.profile.id, &ids);
+                    ui.close();
+                }
+            });
+        }
         if !open {
             continue;
         }
@@ -208,4 +218,23 @@ fn cell_ui(
             ui.data_mut(|m| m.remove::<(PhotoId, String)>(egui::Id::new("last-profile-hover")));
         }
     }
+    // imported profiles (.cube files, generated film looks) can be deleted from their context menu
+    if lightcraft_pipeline::lut::is_lut_profile(p_id) {
+        resp.context_menu(|ui| {
+            if ui.button(crate::i18n::tr("Delete Profile")).clicked() {
+                delete_profiles(app, ui.ctx(), &d.profile.id, &[p_id.to_string()]);
+                ui.close();
+            }
+        });
+    }
+}
+
+/// Delete imported profiles `ids` (`profile.deleteImported`); the photo whose applied profile is one of
+/// them (`applied`) goes back to the default Color profile first.
+fn delete_profiles(app: &mut LightcraftApp, ctx: &egui::Context, applied: &str, ids: &[String]) {
+    if ids.iter().any(|i| i == applied) {
+        let _ = app.run("develop.profile", json!({"id": "lc.color", "amount": 100}));
+    }
+    let deleted = ids.iter().filter(|i| app.run("profile.deleteImported", json!({"id": i})).is_ok()).count();
+    app.toast(ctx, format!("{}: {deleted}", crate::i18n::tr("Profiles deleted")));
 }

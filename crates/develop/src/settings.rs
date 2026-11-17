@@ -122,6 +122,10 @@ pub struct DevelopSettings {
     /// the default, so settings without HDR keep their JSON and `hash64` (and every cached preview stays valid).
     #[serde(skip_serializing_if = "Hdr::is_default")]
     pub hdr: Hdr,
+    /// Film: a scene-referred film rendering (negative, print, grain) that takes over from the camera tone
+    /// curve when a stock is chosen. Not written while off, so settings without it keep their JSON and `hash64`.
+    #[serde(skip_serializing_if = "Film::is_off")]
+    pub film: Film,
     pub curve: ToneCurve,
     pub color: ColorAdj,
     pub mixer: Mixer,
@@ -158,6 +162,7 @@ impl Default for DevelopSettings {
             wb: WhiteBalance::default(),
             light: Light::default(),
             hdr: Hdr::default(),
+            film: Film::default(),
             curve: ToneCurve::default(),
             color: ColorAdj::default(),
             mixer: Mixer::default(),
@@ -612,6 +617,55 @@ pub struct Grain {
 impl Default for Grain {
     fn default() -> Self {
         Self { amount: 0.0, size: 25.0, roughness: 50.0, seed: 0 }
+    }
+}
+
+/// The Film section: which stock renders the photo and how (`lightcraft_pipeline::film`).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Film {
+    /// The film stock's id; empty: off (the camera tone curve renders the photo).
+    pub stock: String,
+    /// The print stock a negative is printed to; empty: the stock's usual one. Reversal stocks have none.
+    pub print: String,
+    /// The film format: "16mm", "35mm" or "120" (grain size and, later, halation and sharpness).
+    pub format: String,
+    /// Colour separation: 0 base, 1 vibrant, 2 very vibrant (in between allowed).
+    pub vibrance: f64,
+    /// Film grain, 0–100 (50: the stock's own).
+    pub grain: f64,
+    /// Halation, 0–100 (50: the stock's own): the red-orange glow around the brightest light.
+    pub halation: f64,
+    /// A softer, filmic roll-off of the brightest scene tones before the film.
+    pub highlight_compression: bool,
+    /// Slightly desaturate the deepest shadows and the brightest highlights.
+    pub desaturate_ends: bool,
+}
+
+impl Default for Film {
+    fn default() -> Self {
+        Self {
+            stock: String::new(),
+            print: String::new(),
+            format: "35mm".into(),
+            vibrance: 1.0,
+            grain: 50.0,
+            halation: 50.0,
+            highlight_compression: false,
+            desaturate_ends: false,
+        }
+    }
+}
+
+impl Film {
+    /// Off: no stock chosen (whatever the other fields hold).
+    pub fn is_off(&self) -> bool {
+        self.stock.is_empty() && *self == Film::default()
+    }
+
+    /// A stock is chosen.
+    pub fn is_on(&self) -> bool {
+        !self.stock.is_empty()
     }
 }
 

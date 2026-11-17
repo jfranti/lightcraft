@@ -66,6 +66,9 @@ const FIELDS: &[(&str, usize)] = &[
     ("GRAIN_ROUGH", 1),
     ("GRAIN_SEED", 1),
     ("GRAIN_AFF", 6),
+    // the Film section (`lightcraft_pipeline::film::Model::gpu_words`)
+    ("FILM", 1),
+    ("FILM_W", 44),
     ("REFINE_SAT", 1),
     ("CALIB", 1),
     ("CALIB_M", 9),
@@ -235,16 +238,21 @@ pub fn finish_block(fp: &FinishParams, masks: &[[f32; MASK_TERMS]], present: &Pr
     let (trc, gamma) = fp.out_trc.code();
     p.u("OUT_TRC", trc);
     p.f("OUT_GAMMA", gamma);
+    // output pixel → grain coordinates (the Grain effect's and the film's)
+    let long = fp.ow.max(fp.oh);
+    let [a, b, c, d, e, f] = fp.out_to_norm.0;
+    let (kx, ky) = (fp.ow / long, fp.oh / long);
+    p.fs("GRAIN_AFF", &[(a * kx) as f32, (b * ky) as f32, (c * kx) as f32, (d * ky) as f32, (e * kx) as f32, (f * ky) as f32]);
     if let Some((amt, cell, rough, seed)) = fp.grain {
         p.b("GRAIN", true);
         p.f("GRAIN_AMT", amt);
         p.f("GRAIN_SC", fp.px_per_long as f32 / cell);
         p.f("GRAIN_ROUGH", rough);
         p.u("GRAIN_SEED", seed);
-        let long = fp.ow.max(fp.oh);
-        let [a, b, c, d, e, f] = fp.out_to_norm.0;
-        let (kx, ky) = (fp.ow / long, fp.oh / long);
-        p.fs("GRAIN_AFF", &[(a * kx) as f32, (b * ky) as f32, (c * kx) as f32, (d * ky) as f32, (e * kx) as f32, (f * ky) as f32]);
+    }
+    if let Some(m) = &fp.film {
+        p.b("FILM", true);
+        p.fs("FILM_W", &m.gpu_words());
     }
     (p.0, aux)
 }

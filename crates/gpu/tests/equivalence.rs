@@ -121,6 +121,27 @@ fn banded_full_size_render_matches() {
 
 fn cases() -> Vec<(&'static str, Edit)> {
     vec![
+        ("film 500T print", |s| s.film = lightcraft_develop::Film { stock: "vision3-500t".into(), ..Default::default() }),
+        ("film velvia reversal", |s| s.film = lightcraft_develop::Film { stock: "velvia-50".into(), vibrance: 2.0, ..Default::default() }),
+        ("film tri-x", |s| s.film = lightcraft_develop::Film { stock: "tri-x-400".into(), ..Default::default() }),
+        ("film cinestill 16mm", |s| {
+            s.light.exposure = 1.5;
+            s.film = lightcraft_develop::Film { stock: "cinestill-800t".into(), format: "16mm".into(), halation: 100.0, ..Default::default() };
+        }),
+        ("film portra scan options", |s| {
+            s.film = lightcraft_develop::Film {
+                stock: "portra-400".into(),
+                vibrance: 0.0,
+                grain: 100.0,
+                highlight_compression: true,
+                desaturate_ends: true,
+                ..Default::default()
+            };
+        }),
+        ("film + typical edits", |s| {
+            typical(s);
+            s.film = lightcraft_develop::Film { stock: "vision3-250d".into(), print: "scan".into(), ..Default::default() };
+        }),
         ("default", |_| {}),
         ("typical", typical),
         ("exposure/contrast/whites", |s| {

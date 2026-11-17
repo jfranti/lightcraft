@@ -118,6 +118,7 @@ pub const UI_COMMANDS: &[UiCommand] = &[
     ("panel.crop", "Crop & Rotate", Some("C"), "Window"),
     ("panel.remove", "Remove", Some("H"), "Window"),
     ("panel.masking", "Masking", Some("M"), "Window"),
+    ("panel.film", "Film", None, "Window"),
     ("panel.redeye", "Red Eye", None, "Window"),
     ("panel.presets", "Presets", Some("Shift+P"), "Window"),
     ("panel.info", "Info", Some("I"), "Window"),
@@ -995,6 +996,10 @@ pub fn run_ui_command(app: &mut LightcraftApp, id: &str, p: &Value) -> Option<Re
         }
         "panel.masking" => {
             panel(app, &ctx, RightPanel::Masking, "Masking");
+            Ok(Value::Null)
+        }
+        "panel.film" => {
+            panel(app, &ctx, RightPanel::Film, "Film");
             Ok(Value::Null)
         }
         "panel.redeye" => {

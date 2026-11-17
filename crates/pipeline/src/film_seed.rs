@@ -40,6 +40,8 @@ pub enum Archetype {
     Cross,
     /// Bleach bypass (skip-bleach): high contrast, low saturation, cool shadows.
     Bleach,
+    /// Black-and-white film (the stock looks only; seeds don't draw it).
+    Mono,
 }
 
 impl Archetype {
@@ -51,6 +53,7 @@ impl Archetype {
             Archetype::Faded => "Faded",
             Archetype::Cross => "Cross",
             Archetype::Bleach => "Bleach",
+            Archetype::Mono => "B&W",
         }
     }
 }
@@ -79,6 +82,95 @@ pub struct FilmParams {
     /// Shadow and highlight tints, OkLab (a, b).
     pub shadow_tint: [f32; 2],
     pub highlight_tint: [f32; 2],
+    /// The stock's grain and sharpness: a LUT carries colour only, so these are applied as the photo's
+    /// Grain and Texture settings alongside the look's profile.
+    pub texture: FilmTexture,
+    /// A film stock's name, for the stock looks ([`stock`]); `None` for seeded ones.
+    #[serde(default)]
+    pub title: Option<String>,
+    /// Black and white: the stock's sensitivity to linear R, G, B (sums to 1); `None` for colour.
+    #[serde(default)]
+    pub mono: Option<[f32; 3]>,
+}
+
+/// The film's format.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Gauge {
+    /// 16 mm motion-picture film: coarse grain, soft.
+    Mm16,
+    /// 35 mm still or motion-picture film.
+    Mm35,
+    /// 120 roll film: fine grain, crisp.
+    Medium,
+}
+
+impl Gauge {
+    pub fn name(self) -> &'static str {
+        match self {
+            Gauge::Mm16 => "16mm",
+            Gauge::Mm35 => "35mm",
+            Gauge::Medium => "120",
+        }
+    }
+}
+
+/// A seeded look's stock speed and gauge, and the Grain and Texture settings they give (LightCraft
+/// units). As in FilmMatch's pipeline the grain is luminance-only and goes in before the look's LUT,
+/// which plays the print curve (so the curve makes it strongest in the midtones), and the softening
+/// of the film's MTF (negative Texture) comes with it.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FilmTexture {
+    pub iso: u32,
+    pub gauge: Gauge,
+    pub grain_amount: f32,
+    pub grain_size: f32,
+    pub grain_roughness: f32,
+    /// Effects Texture (negative: the film's softer fine detail).
+    pub texture: f32,
+}
+
+impl FilmTexture {
+    /// Speed and gauge drawn for `archetype` from their own stream (so a seed's colour doesn't depend
+    /// on them), and the grain and softness they give.
+    fn from_seed(seed: u64, archetype: Archetype) -> FilmTexture {
+        let mut r = Rng(seed ^ 0x6A1F_0F11_4D5E_u64);
+        let speeds: &[u32] = match archetype {
+            Archetype::Print => &[50, 200, 250, 500, 500],
+            Archetype::Slide => &[50, 64, 100, 100, 200],
+            Archetype::Negative => &[100, 160, 200, 400, 400, 800],
+            Archetype::Faded => &[100, 200, 400, 400],
+            Archetype::Cross => &[100, 200, 400],
+            Archetype::Bleach | Archetype::Mono => &[200, 400, 500, 800],
+        };
+        let iso = speeds[(r.next() % speeds.len() as u64) as usize];
+        let gauge = match archetype {
+            // motion-picture stocks: a fair share of 16 mm
+            Archetype::Print | Archetype::Bleach if r.chance(0.3) => Gauge::Mm16,
+            Archetype::Slide | Archetype::Negative if r.chance(0.15) => Gauge::Medium,
+            _ => Gauge::Mm35,
+        };
+        // 35 mm grain by speed: one stop faster, a little more and coarser grain
+        let stops = (iso as f32 / 100.0).log2();
+        let (mut amount, mut size) = (10.0 + 6.0 * stops, 22.0 + 7.0 * stops);
+        let (gain, scale, texture) = match gauge {
+            Gauge::Mm16 => (1.45, 1.5, r.range(-30.0, -20.0)),
+            Gauge::Mm35 => (1.0, 1.0, r.range(-12.0, -5.0)),
+            Gauge::Medium => (0.65, 0.7, r.range(-4.0, 0.0)),
+        };
+        amount = (amount * gain * r.range(0.85, 1.15)).clamp(4.0, 60.0);
+        size = (size * scale * r.range(0.9, 1.1)).clamp(10.0, 75.0);
+        let roughness = (40.0 + 5.0 * stops + r.range(-10.0, 10.0)).clamp(20.0, 80.0);
+        FilmTexture {
+            iso,
+            gauge,
+            grain_amount: amount.round(),
+            grain_size: size.round(),
+            grain_roughness: roughness.round(),
+            texture: texture.round(),
+        }
+    }
 }
 
 /// Largest OkLab chroma a neutral grey may take on through a seeded look.
@@ -132,7 +224,7 @@ impl FilmParams {
             Archetype::Negative => ((0.0, 0.2), 0.015, (0.015, 0.05), (0.93, 0.97), (0.88, 1.05), (0.75, 0.95), (0.6, 0.85), (0.15, 0.22)),
             Archetype::Faded => ((-0.12, 0.08), 0.02, (0.05, 0.09), (0.88, 0.94), (0.6, 0.85), (0.6, 0.85), (0.5, 0.8), (0.1, 0.16)),
             Archetype::Cross => ((0.35, 0.6), 0.045, (0.0, 0.03), (0.94, 1.0), (1.1, 1.3), (0.85, 1.0), (0.7, 0.9), (0.17, 0.25)),
-            Archetype::Bleach => ((0.5, 0.8), 0.01, (0.0, 0.02), (0.95, 1.0), (0.4, 0.65), (0.6, 0.85), (0.5, 0.75), (0.08, 0.13)),
+            Archetype::Bleach | Archetype::Mono => ((0.5, 0.8), 0.01, (0.0, 0.02), (0.95, 1.0), (0.4, 0.65), (0.6, 0.85), (0.5, 0.75), (0.08, 0.13)),
         };
         let base_c = r.range(c.0, c.1);
         let contrast = std::array::from_fn(|_| base_c + r.range(-0.06, 0.06) * (x / 0.01f32).min(2.0));
@@ -165,7 +257,7 @@ impl FilmParams {
             Archetype::Negative => (r.tint(&[150.0, 200.0, 300.0], 0.004, 0.014), r.tint(&[60.0, 90.0, 120.0], 0.006, 0.016)),
             Archetype::Faded => (r.tint(&[330.0, 200.0, 20.0], 0.01, 0.025), r.tint(&[60.0, 30.0], 0.008, 0.02)),
             Archetype::Cross => (r.tint(&[230.0, 160.0], 0.01, 0.025), r.tint(&[100.0, 80.0], 0.01, 0.025)),
-            Archetype::Bleach => (r.tint(&[220.0, 240.0], 0.006, 0.016), r.tint(&[70.0], 0.0, 0.008)),
+            Archetype::Bleach | Archetype::Mono => (r.tint(&[220.0, 240.0], 0.006, 0.016), r.tint(&[70.0], 0.0, 0.008)),
         };
         FilmParams {
             seed,
@@ -181,12 +273,18 @@ impl FilmParams {
             hue_shifts,
             shadow_tint,
             highlight_tint,
+            texture: FilmTexture::from_seed(seed, archetype),
+            title: None,
+            mono: None,
         }
     }
 
-    /// A short name for the look: `Film 48213 · Print`.
+    /// A short name for the look: `Film 48213 · Print · 35mm 250`.
     pub fn name(&self) -> String {
-        format!("Film {} · {}", self.seed, self.archetype.name())
+        if let Some(t) = &self.title {
+            return t.clone();
+        }
+        format!("Film {} · {} · {} {}", self.seed, self.archetype.name(), self.texture.gauge.name(), self.texture.iso)
     }
 
     /// One display-encoded sRGB colour through the look.
@@ -198,6 +296,11 @@ impl FilmParams {
             let s = s_curve(p, m + self.pivot[i], self.contrast[i]);
             self.black[i] + (self.white[i] - self.black[i]) * s
         });
+        // black and white: the stock's own response to colour
+        let toned = match self.mono {
+            Some(w) => [srgb_encode(w[0] * srgb_decode(toned[0]) + w[1] * srgb_decode(toned[1]) + w[2] * srgb_decode(toned[2])); 3],
+            None => toned,
+        };
         // 2. colour, in OkLab
         let [l, a, b] = oklab(toned.map(srgb_decode));
         let (mut a, mut b) = (a, b);
@@ -256,6 +359,422 @@ impl FilmParams {
         }
         Lut3d { size: n, data, domain_min: [0.0; 3], domain_max: [1.0; 3], title: Some(self.name()) }
     }
+}
+
+/// A film stock's look: our own reading of the stock's documented character (see the film-look
+/// research notes), not measured data or anyone's LUT. `(id, name)` of every stock, in display order.
+pub const STOCKS: &[(&str, &str)] = &[
+    ("portra-160", "Portra 160-style"),
+    ("portra-400", "Portra 400-style"),
+    ("portra-800", "Portra 800-style"),
+    ("ektar-100", "Ektar 100-style"),
+    ("gold-200", "Gold 200-style"),
+    ("superia-400", "Superia 400-style"),
+    ("pro-400h", "Pro 400H-style"),
+    ("vista-200", "Agfa Vista 200-style"),
+    ("velvia-50", "Velvia 50-style"),
+    ("provia-100f", "Provia 100F-style"),
+    ("ektachrome-e100", "Ektachrome E100-style"),
+    ("kodachrome-64", "Kodachrome 64-style"),
+    ("vision3-500t", "Vision3 500T + 2383 print-style"),
+    ("vision3-500t-16mm", "Vision3 500T 16mm-style"),
+    ("vision3-250d", "Vision3 250D + 2383 print-style"),
+    ("cinestill-800t", "CineStill 800T-style"),
+    ("eterna", "Eterna-style"),
+    ("polaroid-600", "Polaroid 600-style"),
+    ("tri-x-400", "Tri-X 400-style"),
+    ("hp5-400", "HP5 Plus 400-style"),
+    ("tmax-100", "T-Max 100-style"),
+    ("acros-100", "Acros 100-style"),
+    ("delta-3200", "Delta 3200-style"),
+];
+
+/// An (a, b) tint of chroma `c` at OkLCh hue `hue` (degrees).
+fn tint(hue: f32, c: f32) -> [f32; 2] {
+    [c * hue.to_radians().cos(), c * hue.to_radians().sin()]
+}
+
+impl FilmTexture {
+    /// The grain and softness of a stock of speed `iso` in `gauge` (as [`FilmTexture::from_seed`] draws
+    /// them, at their middle values).
+    fn of_stock(iso: u32, gauge: Gauge) -> FilmTexture {
+        let stops = (iso as f32 / 100.0).log2();
+        let (gain, scale, texture) = match gauge {
+            Gauge::Mm16 => (1.45, 1.5, -25.0),
+            Gauge::Mm35 => (1.0, 1.0, -8.0),
+            Gauge::Medium => (0.65, 0.7, -2.0),
+        };
+        FilmTexture {
+            iso,
+            gauge,
+            grain_amount: ((10.0 + 6.0 * stops) * gain).clamp(4.0, 60.0).round(),
+            grain_size: ((22.0 + 7.0 * stops) * scale).clamp(10.0, 75.0).round(),
+            grain_roughness: (40.0 + 5.0 * stops).clamp(20.0, 80.0).round(),
+            texture,
+        }
+    }
+}
+
+/// The look of film stock `id` (one of [`STOCKS`]).
+pub fn stock(id: &str) -> Option<FilmParams> {
+    let name = STOCKS.iter().find(|s| s.0 == id)?.1;
+    // (archetype, iso, gauge, contrast, crossover pivot R/G/B, fade, white, saturation, shadow and
+    // highlight saturation, chroma knee, hue shifts [centre, width, shift], shadow tint, highlight tint, B&W)
+    #[allow(clippy::type_complexity)]
+    let (archetype, iso, gauge, contrast, pivot, fade, white, sat, (ssat, hsat), knee, shifts, st, ht, mono): (
+        Archetype,
+        u32,
+        Gauge,
+        f32,
+        [f32; 3],
+        f32,
+        f32,
+        f32,
+        (f32, f32),
+        f32,
+        &[[f32; 3]],
+        [f32; 2],
+        [f32; 2],
+        Option<[f32; 3]>,
+    ) = match id {
+        // Portra: low contrast, gentle saturation, warm skin, muted olive greens
+        "portra-160" => (
+            Archetype::Negative,
+            160,
+            Gauge::Mm35,
+            0.06,
+            [0.004, 0.0, -0.006],
+            0.012,
+            0.965,
+            0.92,
+            (0.85, 0.72),
+            0.17,
+            &[[140.0, 45.0, -6.0]],
+            tint(200.0, 0.006),
+            tint(70.0, 0.008),
+            None,
+        ),
+        "portra-400" => (
+            Archetype::Negative,
+            400,
+            Gauge::Mm35,
+            0.10,
+            [0.004, 0.0, -0.006],
+            0.012,
+            0.965,
+            0.95,
+            (0.85, 0.72),
+            0.17,
+            &[[140.0, 45.0, -6.0]],
+            tint(200.0, 0.006),
+            tint(70.0, 0.009),
+            None,
+        ),
+        "portra-800" => (
+            Archetype::Negative,
+            800,
+            Gauge::Mm35,
+            0.14,
+            [0.004, 0.002, -0.006],
+            0.015,
+            0.96,
+            1.0,
+            (0.85, 0.75),
+            0.18,
+            &[[140.0, 45.0, -4.0]],
+            tint(170.0, 0.01),
+            tint(70.0, 0.01),
+            None,
+        ),
+        // Ektar: punchy, saturated, deep reds and blues, clean neutrals
+        "ektar-100" => (
+            Archetype::Negative,
+            100,
+            Gauge::Mm35,
+            0.32,
+            [0.0; 3],
+            0.0,
+            0.98,
+            1.25,
+            (0.95, 0.85),
+            0.24,
+            &[[25.0, 35.0, -4.0], [265.0, 40.0, -6.0]],
+            tint(240.0, 0.004),
+            tint(80.0, 0.004),
+            None,
+        ),
+        // Gold: warm, yellow-biased consumer film
+        "gold-200" => (
+            Archetype::Negative,
+            200,
+            Gauge::Mm35,
+            0.18,
+            [0.008, 0.003, -0.012],
+            0.015,
+            0.96,
+            1.06,
+            (0.85, 0.78),
+            0.2,
+            &[[100.0, 45.0, -6.0]],
+            tint(60.0, 0.006),
+            tint(80.0, 0.016),
+            None,
+        ),
+        // Superia: cooler, greens towards teal, green-leaning shadows
+        "superia-400" => (
+            Archetype::Negative,
+            400,
+            Gauge::Mm35,
+            0.20,
+            [-0.004, 0.004, 0.0],
+            0.015,
+            0.965,
+            1.05,
+            (0.85, 0.78),
+            0.2,
+            &[[140.0, 45.0, 10.0], [25.0, 30.0, 4.0]],
+            tint(160.0, 0.012),
+            tint(90.0, 0.008),
+            None,
+        ),
+        // Pro 400H: pastel, airy, mint greens, cyan-leaning blues
+        "pro-400h" => (
+            Archetype::Negative,
+            400,
+            Gauge::Mm35,
+            0.05,
+            [0.0, 0.002, 0.004],
+            0.025,
+            0.955,
+            0.85,
+            (0.8, 0.65),
+            0.16,
+            &[[140.0, 50.0, 14.0], [265.0, 40.0, -8.0]],
+            tint(210.0, 0.01),
+            tint(80.0, 0.006),
+            None,
+        ),
+        // Agfa Vista: warm, strong reds
+        "vista-200" => (
+            Archetype::Negative,
+            200,
+            Gauge::Mm35,
+            0.18,
+            [0.006, 0.0, -0.004],
+            0.015,
+            0.965,
+            1.1,
+            (0.85, 0.78),
+            0.21,
+            &[[25.0, 35.0, -6.0], [140.0, 40.0, -6.0]],
+            tint(190.0, 0.008),
+            tint(60.0, 0.01),
+            None,
+        ),
+        // Velvia: very saturated slide film, vivid greens, deep blues, magenta-leaning shadows
+        "velvia-50" => (
+            Archetype::Slide,
+            50,
+            Gauge::Mm35,
+            0.60,
+            [0.0, 0.0, 0.002],
+            0.0,
+            0.995,
+            1.35,
+            (1.0, 0.9),
+            0.27,
+            &[[140.0, 40.0, -6.0], [265.0, 40.0, 6.0]],
+            tint(320.0, 0.008),
+            tint(80.0, 0.003),
+            None,
+        ),
+        // Provia: the neutral slide film
+        "provia-100f" => (
+            Archetype::Slide,
+            100,
+            Gauge::Mm35,
+            0.42,
+            [0.0; 3],
+            0.0,
+            0.99,
+            1.12,
+            (0.95, 0.88),
+            0.23,
+            &[],
+            tint(250.0, 0.004),
+            tint(80.0, 0.002),
+            None,
+        ),
+        // Ektachrome: clean, cool, cyan-leaning blues
+        "ektachrome-e100" => (
+            Archetype::Slide,
+            100,
+            Gauge::Mm35,
+            0.45,
+            [-0.002, 0.0, 0.004],
+            0.0,
+            0.99,
+            1.15,
+            (0.95, 0.88),
+            0.23,
+            &[[265.0, 40.0, -6.0]],
+            tint(230.0, 0.008),
+            tint(200.0, 0.004),
+            None,
+        ),
+        // Kodachrome: rich warm reds, golden yellows, deep cyan-blue skies, dense shadows
+        "kodachrome-64" => (
+            Archetype::Slide,
+            64,
+            Gauge::Mm35,
+            0.50,
+            [0.006, 0.0, -0.004],
+            0.0,
+            0.985,
+            1.18,
+            (0.9, 0.85),
+            0.22,
+            &[[100.0, 40.0, -8.0], [265.0, 40.0, -10.0]],
+            tint(60.0, 0.006),
+            tint(70.0, 0.008),
+            None,
+        ),
+        // Vision3 negative printed to 2383: teal shadows, warm highlights, rich mids
+        "vision3-500t" => (
+            Archetype::Print,
+            500,
+            Gauge::Mm35,
+            0.38,
+            [0.0, 0.0, 0.006],
+            0.005,
+            0.955,
+            1.0,
+            (0.8, 0.65),
+            0.17,
+            &[[140.0, 45.0, 12.0], [55.0, 35.0, -4.0]],
+            tint(205.0, 0.018),
+            tint(65.0, 0.014),
+            None,
+        ),
+        "vision3-500t-16mm" => (
+            Archetype::Print,
+            500,
+            Gauge::Mm16,
+            0.38,
+            [0.0, 0.0, 0.006],
+            0.01,
+            0.95,
+            0.97,
+            (0.8, 0.65),
+            0.17,
+            &[[140.0, 45.0, 12.0], [55.0, 35.0, -4.0]],
+            tint(205.0, 0.018),
+            tint(65.0, 0.014),
+            None,
+        ),
+        "vision3-250d" => (
+            Archetype::Print,
+            250,
+            Gauge::Mm35,
+            0.35,
+            [0.0; 3],
+            0.005,
+            0.96,
+            1.02,
+            (0.82, 0.68),
+            0.18,
+            &[[140.0, 45.0, 8.0]],
+            tint(205.0, 0.012),
+            tint(65.0, 0.01),
+            None,
+        ),
+        // CineStill 800T: tungsten film in daylight reads cool; teal shadows (no halation here)
+        "cinestill-800t" => (
+            Archetype::Print,
+            800,
+            Gauge::Mm35,
+            0.30,
+            [-0.01, 0.0, 0.015],
+            0.01,
+            0.96,
+            1.05,
+            (0.82, 0.7),
+            0.19,
+            &[[25.0, 30.0, -6.0]],
+            tint(215.0, 0.02),
+            tint(230.0, 0.008),
+            None,
+        ),
+        // Eterna: low contrast, low saturation, cyan-green shadows
+        "eterna" => (
+            Archetype::Print,
+            250,
+            Gauge::Mm35,
+            0.16,
+            [0.0, 0.002, 0.002],
+            0.015,
+            0.95,
+            0.8,
+            (0.7, 0.6),
+            0.15,
+            &[[140.0, 45.0, 14.0], [25.0, 30.0, -4.0]],
+            tint(190.0, 0.014),
+            tint(70.0, 0.006),
+            None,
+        ),
+        // Polaroid 600: soft, faded, cyan shadows, warm highlights
+        "polaroid-600" => (
+            Archetype::Faded,
+            640,
+            Gauge::Medium,
+            0.12,
+            [0.004, -0.004, 0.002],
+            0.05,
+            0.92,
+            0.85,
+            (0.75, 0.7),
+            0.15,
+            &[[140.0, 45.0, 10.0], [265.0, 40.0, -8.0]],
+            tint(200.0, 0.02),
+            tint(75.0, 0.018),
+            None,
+        ),
+        // black and white: contrast and the stock's colour sensitivity (Acros sees red less)
+        "tri-x-400" => {
+            (Archetype::Mono, 400, Gauge::Mm35, 0.42, [0.0; 3], 0.005, 0.985, 1.0, (1.0, 1.0), 0.2, &[], [0.0; 2], [0.0; 2], Some([0.30, 0.59, 0.11]))
+        }
+        "hp5-400" => {
+            (Archetype::Mono, 400, Gauge::Mm35, 0.32, [0.0; 3], 0.01, 0.98, 1.0, (1.0, 1.0), 0.2, &[], [0.0; 2], [0.0; 2], Some([0.31, 0.57, 0.12]))
+        }
+        "tmax-100" => {
+            (Archetype::Mono, 100, Gauge::Mm35, 0.36, [0.0; 3], 0.0, 0.99, 1.0, (1.0, 1.0), 0.2, &[], [0.0; 2], [0.0; 2], Some([0.28, 0.60, 0.12]))
+        }
+        "acros-100" => {
+            (Archetype::Mono, 100, Gauge::Mm35, 0.40, [0.0; 3], 0.0, 0.99, 1.0, (1.0, 1.0), 0.2, &[], [0.0; 2], [0.0; 2], Some([0.22, 0.64, 0.14]))
+        }
+        "delta-3200" => {
+            (Archetype::Mono, 3200, Gauge::Mm35, 0.28, [0.0; 3], 0.03, 0.97, 1.0, (1.0, 1.0), 0.2, &[], [0.0; 2], [0.0; 2], Some([0.30, 0.58, 0.12]))
+        }
+        _ => return None,
+    };
+    Some(FilmParams {
+        seed: 0,
+        archetype,
+        contrast: [contrast; 3],
+        pivot,
+        black: [fade; 3],
+        white: [white; 3],
+        saturation: sat,
+        shadow_sat: ssat,
+        highlight_sat: hsat,
+        chroma_knee: knee,
+        hue_shifts: shifts.to_vec(),
+        shadow_tint: st,
+        highlight_tint: ht,
+        texture: FilmTexture::of_stock(iso, gauge),
+        title: Some(name.to_string()),
+        mono,
+    })
 }
 
 /// An S-curve through (0,0), (`pivot`, `pivot`) and (1,1) of strength `k` (0 = identity; negative
@@ -360,6 +879,20 @@ mod tests {
             // black stays dark and white stays bright
             assert!(at(0, 0, 0).iter().all(|v| *v < 0.35) && at(16, 16, 16).iter().all(|v| *v > 0.8), "seed {seed}");
         }
+    }
+
+    #[test]
+    fn every_stock_is_usable_and_black_and_white_stocks_are_grey() {
+        for (id, name) in STOCKS {
+            let look = stock(id).unwrap_or_else(|| panic!("{id}"));
+            assert_eq!(look.name(), *name);
+            let lut = look.lut(9);
+            assert!(lut.data.iter().flatten().all(|v| v.is_finite() && (0.0..=1.0).contains(v)), "{id}");
+            if look.mono.is_some() {
+                assert!(lut.data.iter().all(|c| (c[0] - c[1]).abs() < 0.01 && (c[1] - c[2]).abs() < 0.01), "{id} is not grey");
+            }
+        }
+        assert!(stock("no-such-film").is_none());
     }
 
     #[test]

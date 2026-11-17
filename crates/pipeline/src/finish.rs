@@ -174,6 +174,8 @@ pub struct FinishParams {
     /// Highlights/Shadows tonal ranges in EV over grey ([`tone_mask`]): Shadows fades out from
     /// `[0]` to `[1]` and in from black at `[4]`, Highlights fades in from `[2]` to `[3]`.
     pub tone_mask: [f32; 5],
+    /// The Film section's model when it has a stock: it renders scene light to display instead of `tone`.
+    pub film: Option<crate::film::Model>,
     pub clar: f32,
     pub tex: f32,
     pub dehaze: f32,
@@ -244,6 +246,8 @@ impl FinishParams {
             hl: (s.light.highlights / 100.0) as f32,
             sh: (s.light.shadows / 100.0) as f32,
             tone_mask: tone_mask(s, info),
+            // the film balanced to the photo: grey renders as the camera's own curve renders it
+            film: film_model(s, info),
             clar,
             tex,
             dehaze,
@@ -327,6 +331,21 @@ pub fn tone_levels(img: &lightcraft_raster::Rgb32f) -> Option<[f32; 2]> {
 /// `peak` is the HDR render's peak relative to SDR white ([`lightcraft_develop::Hdr::peak`]); at 1.0 (SDR)
 /// every arm is the SDR tone map. An HDR render keeps the camera's look through the midtones and
 /// lifts its highlights past white ([`ToneMap::camera_hdr`]), so it matches the SDR render below them.
+/// The Film section's model for `s`, balanced to the photo: grey renders as the camera's own curve
+/// renders it.
+pub fn film_model(s: &DevelopSettings, info: &SourceInfo) -> Option<crate::film::Model> {
+    crate::film::Model::new(&s.film).map(|mut m| {
+        m.match_grey(base_tone(s, info, 1.0).apply(0.18));
+        m
+    })
+}
+
+/// Film exposure per unit of the scene-linear image (the exposure slider's gain times the film's grey
+/// match), or 1 without film.
+pub fn film_scale(s: &DevelopSettings, info: &SourceInfo) -> f32 {
+    film_model(s, info).map_or(1.0, |m| 2f32.powf(s.light.exposure as f32) * m.gain)
+}
+
 pub fn base_tone(s: &DevelopSettings, info: &SourceInfo, peak: f32) -> ToneMap {
     let l = &s.light;
     match s.process.process() {
@@ -588,19 +607,41 @@ pub(crate) fn finish_with<T: Copy + Default + Send>(
                 c = crate::colorops::calibrate(c, fp.calib.as_ref(), fp.shadow_tint);
             }
 
-            // --- tone map on luminance, highlight desaturation
-            let yl = luminance_2020(c);
-            let o = tone.apply(yl);
-            let mut d = if yl > 1e-9 { c.map(|v| v * o / yl) } else { [0.0; 3] };
-            let k = tone.chroma_scale(o);
-            if k != 1.0 {
-                d = d.map(|v| o + (v - o) * k);
-            }
-            let mx = d[0].max(d[1]).max(d[2]);
-            if mx > peak {
-                let t = ((mx - peak) / (mx - o).max(1e-6)).clamp(0.0, 1.0);
-                d = d.map(|v| v + (o - v) * t);
-            }
+            let mut d = if let Some(fm) = &fp.film {
+                // --- film: negative, grain in its density, print (instead of the camera tone curve)
+                let ex = fm.exposure(c);
+                let grain = if fm.grain > 0.0 {
+                    let n = out_to_norm.apply(Point::new(x as f64 + 0.5, y as f64 + 0.5));
+                    let (gx, gy) = ((n.x * fp.ow) as f32 / long as f32, (n.y * fp.oh) as f32 / long as f32);
+                    let sc = 1.0 / fm.grain_cell;
+                    // mostly shared between the layers (film grain reads as luminance), a little each its own
+                    let shared = grain_noise(gx * sc, gy * sc, 0x3C6E_F372);
+                    fm.grain_for(
+                        ex,
+                        std::array::from_fn(|k| {
+                            if fm.is_mono() { shared } else { 0.85 * shared + 0.4 * grain_noise(gx * sc, gy * sc, 0x9E37_79B9 ^ (k as u32 + 1)) }
+                        }),
+                    )
+                } else {
+                    [0.0; 3]
+                };
+                fm.render(c, grain)
+            } else {
+                // --- tone map on luminance, highlight desaturation
+                let yl = luminance_2020(c);
+                let o = tone.apply(yl);
+                let mut d = if yl > 1e-9 { c.map(|v| v * o / yl) } else { [0.0; 3] };
+                let k = tone.chroma_scale(o);
+                if k != 1.0 {
+                    d = d.map(|v| o + (v - o) * k);
+                }
+                let mx = d[0].max(d[1]).max(d[2]);
+                if mx > peak {
+                    let t = ((mx - peak) / (mx - o).max(1e-6)).clamp(0.0, 1.0);
+                    d = d.map(|v| v + (o - v) * t);
+                }
+                d
+            };
 
             // --- colour
             d = ops.apply(d, l_sat, l_hue);

@@ -226,3 +226,34 @@ fn redeye_k(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups
     }
     put_rgb(i, c);
 }
+
+fn rgb_b(i: u32) -> vec3<f32> {
+    return vec3<f32>(b[3u * i], b[3u * i + 1u], b[3u * i + 2u]);
+}
+
+fn rgb_c(i: u32) -> vec3<f32> {
+    return vec3<f32>(c[3u * i], c[3u * i + 1u], c[3u * i + 2u]);
+}
+
+// Film halation's source (`film::halation_source`): the light over the threshold P1, tinted red-orange.
+@compute @workgroup_size(256)
+fn halation_bright_k(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nw: vec3<u32>) {
+    let i = lin_index(g, nw);
+    if (i >= pu(0u)) {
+        return;
+    }
+    let th = pf(1u);
+    let over = max(lum2020(rgb_a(i)) / th - 1.0, 0.0);
+    let h = th * over / (1.0 + over / 4.0);
+    put_rgb(i, vec3<f32>(1.0, 0.32, 0.06) * h);
+}
+
+// Film halation added back (`film::add_halation`): a + P1 · (0.7 near + 0.3 far).
+@compute @workgroup_size(256)
+fn halation_add_k(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nw: vec3<u32>) {
+    let i = lin_index(g, nw);
+    if (i >= pu(0u)) {
+        return;
+    }
+    put_rgb(i, rgb_a(i) + pf(1u) * (0.7 * rgb_b(i) + 0.3 * rgb_c(i)));
+}

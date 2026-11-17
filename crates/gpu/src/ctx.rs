@@ -57,6 +57,8 @@ const MODULES: &[Module] = &[
             "xguided_pre",
             "xguided_ab",
             "xguided_apply",
+            "halation_bright_k",
+            "halation_add_k",
         ],
     },
     Module {
